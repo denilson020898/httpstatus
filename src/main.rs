@@ -20,6 +20,8 @@ impl From<reqwest::Error> for AppError {
     }
 }
 
+const WORKERS: usize = 4;
+
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let file = std::fs::File::open("urls.txt")?;
@@ -28,15 +30,30 @@ async fn main() -> Result<(), AppError> {
 
     let client = reqwest::Client::new();
     let mut workers = workers::Workers::new();
+    let (tx, rx) = async_channel::bounded(WORKERS * 2);
 
-    for line in buffile.lines() {
-        let line = line?;
+    workers.spawn(async move {
+        for line in buffile.lines() {
+            let line = line?;
+            tx.send(line).await.unwrap();
+        }
+        Ok(())
+    });
+
+    for _ in 0..WORKERS {
         let client = client.clone();
+        let rx = rx.clone();
         workers.spawn(async move {
-            let resp = client.get(&line).send().await?;
-            println!("{},{}", line, resp.status().as_u16());
-            Ok(())
-        });
+            loop {
+                match rx.recv().await {
+                    Err(_) => break Ok(()),
+                    Ok(line) => {
+                        let resp = client.get(&line).send().await?;
+                        println!("{}.{}", line, resp.status().as_u16());
+                    }
+                }
+            }
+        })
     }
 
     workers.run().await
